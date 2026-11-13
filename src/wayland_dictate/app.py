@@ -44,10 +44,10 @@ from PySide6.QtWidgets import (
 from .i18n import init_i18n, set_language, tr
 
 # Initialiseer vertalingen vanuit locales/ op basis van opgeslagen config
-CONFIG_DIR = Path.home() / ".config" / "lemonade-dictate"
+CONFIG_DIR = Path.home() / ".config" / "wayland-dictate"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
-SOCKET_PATH = RUNTIME_DIR / "lemonade_dictate.sock"
+SOCKET_PATH = RUNTIME_DIR / "wayland_dictate.sock"
 
 # Laad tijdelijk config in om initiële taal te bepalen (default: en)
 _init_lang = "en"
@@ -76,7 +76,7 @@ DEFAULT_TRANSLATE_PROMPT = (
 
 DEFAULT_CONFIG = {
     "ui_language": "en",
-    "lemonade_url": "http://localhost:13305/api/v1",
+    "llm_url": "http://localhost:13305/api/v1",
     "api_key": "",
     "source_language": "nl",
     "dictation_mode": "cleanup",  # "cleanup" | "translate_en"
@@ -287,7 +287,7 @@ class DictationEngine:
 
     def preload_models(self) -> None:
         with self.cfg_lock:
-            url = self.cfg["lemonade_url"].rstrip("/")
+            url = self.cfg["llm_url"].rstrip("/")
             api_key = self.cfg.get("api_key", "").strip()
             headers = self._auth_headers(api_key)
             w_model = self.cfg["whisper_model"]
@@ -310,7 +310,7 @@ class DictationEngine:
                     )
                     if npu_on and l_model:
                         client.post(f"{url}/load", json={"model_name": l_model}, timeout=30.0)
-            self.signals.status_message.emit("API / Lemonade connected.")
+            self.signals.status_message.emit("API / llm connected.")
         except Exception as exc:
             self.signals.status_message.emit(f"Endpoint warning: {exc}")
 
@@ -451,7 +451,7 @@ class DictationEngine:
                             break
 
                 with self.cfg_lock:
-                    url = self.cfg["lemonade_url"].rstrip("/")
+                    url = self.cfg["llm_url"].rstrip("/")
                     api_key = self.cfg.get("api_key", "").strip()
                     headers = self._auth_headers(api_key)
                     w_model = self.cfg["whisper_model"]
@@ -598,7 +598,7 @@ class MainWindow(QMainWindow):
         self.form_models = QFormLayout(self.grp_models)
 
         url_row = QHBoxLayout()
-        self.url_edit = QLineEdit(self.cfg["lemonade_url"])
+        self.url_edit = QLineEdit(self.cfg["llm_url"])
         self.refresh_btn = QPushButton()
         self.refresh_btn.clicked.connect(self._on_refresh_models)
         url_row.addWidget(self.url_edit, 1)
@@ -1030,7 +1030,7 @@ class MainWindow(QMainWindow):
         self.cfg.update(
             {
                 "ui_language": self.ui_lang_combo.currentData(),
-                "lemonade_url": self.url_edit.text().strip(),
+                "llm_url": self.url_edit.text().strip(),
                 "api_key": self.api_key_edit.text().strip(),
                 "whisper_model": self.whisper_combo.currentText().strip(),
                 "whisper_backend": self.backend_combo.currentText().strip(),
@@ -1062,8 +1062,8 @@ class MainWindow(QMainWindow):
     def _register_kde_shortcut(self) -> None:
         self._save_and_apply()
         sc = self.cfg["shortcut"]
-        desktop_file = Path.home() / ".local/share/applications/lemonade-dictate-toggle.desktop"
-        toggle_bin = Path.home() / ".local/bin/lemonade-dictate"
+        desktop_file = Path.home() / ".local/share/applications/wayland-dictate-toggle.desktop"
+        toggle_bin = Path.home() / ".local/bin/wayland-dictate"
 
         desktop_file.write_text(
             "[Desktop Entry]\n"
@@ -1084,7 +1084,7 @@ class MainWindow(QMainWindow):
                     "--group",
                     "services",
                     "--group",
-                    "lemonade-dictate-toggle.desktop",
+                    "wayland-dictate-toggle.desktop",
                     "--key",
                     "_launch",
                     f"{sc},none,Wayland Live Dictate Toggle",
@@ -1205,7 +1205,7 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setDesktopFileName("lemonade-dictate")
+    app.setDesktopFileName("wayland-dictate")
 
     cfg = load_config()
     signals = EngineSignals()
