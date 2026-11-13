@@ -6,7 +6,7 @@ It connects to any local or remote OpenAI-compatible API backend (such as Lemona
 
 ---
 
-## ✨ Key Features
+## Key Features
 
 * **Wayland Native (`dotool`)**: Works flawlessly across modern Wayland compositors (like KDE Plasma 6 and GNOME) without needing X11.
 * **Universal API Support**: Compatible with any OpenAI-compatible `/audio/transcriptions` and `/chat/completions` endpoint.
@@ -19,7 +19,7 @@ It connects to any local or remote OpenAI-compatible API backend (such as Lemona
 
 ---
 
-## 🚀 Installation
+## Installation
 
 ### Option 1: Run the AppImage (Recommended)
 Download the pre-compiled **AppImage** from the [Releases](https://github.com/YOUR_GITHUB_USERNAME/wayland-dictate/releases) page, make it executable, and run it:
@@ -27,3 +27,36 @@ Download the pre-compiled **AppImage** from the [Releases](https://github.com/YO
 ```bash
 chmod +x Wayland-Live-Dictate-x86_64.AppImage
 ./Wayland-Live-Dictate-x86_64.AppImage
+```
+
+### Option 2: Run from Source (Python / UV)
+Ensure you have dotool installed on your system, then clone and run the repository:
+```bash
+git clone [https://github.com/YOUR_GITHUB_USERNAME/wayland-dictate.git](https://github.com/YOUR_GITHUB_USERNAME/wayland-dictate.git)
+cd wayland-dictate
+
+# Create a virtual environment and install dependencies
+uv venv .venv
+source .venv/bin/activate
+uv pip install -e .
+
+# Run the application
+wayland-dictate
+```
+Note on dotool: Ensure the dotool daemon (dotoold) is running and your user has proper permissions to /dev/uinput.
+
+## Configuration
+
+Settings are automatically saved to ~/.config/wayland-dictate/config.json. You can configure:
+* API Endpoint URL (e.g., http://localhost:13305/api/v1)
+* API Key (optional, for secured endpoints or cloud gateways)
+* STT & LLM Models (e.g., Whisper-Large-v3-Turbo, Gemma)
+* VAD & RMS Noise Thresholds
+* Keyboard Layout & XKB Variants
+
+## AppImage & Distribution
+
+To build a fresh AppImage locally (requires uv and pyinstaller):
+```bash
+./packaging/build_appimage.sh
+```
