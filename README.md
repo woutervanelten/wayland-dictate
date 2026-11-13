@@ -25,7 +25,7 @@ It connects to any local or remote OpenAI-compatible API backend (such as Lemona
 ## Installation
 
 ### Option 1: Run the AppImage (Recommended)
-Download the pre-compiled **AppImage** from the [Releases](https://github.com/YOUR_GITHUB_USERNAME/wayland-dictate/releases) page, make it executable, and run it:
+Download the pre-compiled **AppImage** from the [Releases](https://github.com/woutervanelten/wayland-dictate/releases) page, make it executable, and run it:
 
 ```bash
 chmod +x Wayland-Live-Dictate-x86_64.AppImage
@@ -35,7 +35,7 @@ chmod +x Wayland-Live-Dictate-x86_64.AppImage
 ### Option 2: Run from Source (Python / UV)
 Ensure you have dotool installed on your system, then clone and run the repository:
 ```bash
-git clone [https://github.com/YOUR_GITHUB_USERNAME/wayland-dictate.git](https://github.com/YOUR_GITHUB_USERNAME/wayland-dictate.git)
+git clone [https://github.com/woutervanelten/wayland-dictate.git](https://github.com/woutervanelten/wayland-dictate.git)
 cd wayland-dictate
 
 # Create a virtual environment and install dependencies
