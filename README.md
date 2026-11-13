@@ -18,6 +18,9 @@ It connects to any local or remote OpenAI-compatible API backend (such as Lemona
 * **System Tray & Global Shortcuts**: Runs discreetly in the system tray with global hotkey support (e.g., via KDE Plasma global shortcuts).
 
 ---
+<img width="608" height="868" alt="image" src="https://github.com/user-attachments/assets/ae288181-6fca-4828-9d6b-da4ecf595686" />
+
+---
 
 ## Installation
 
