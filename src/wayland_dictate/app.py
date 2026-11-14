@@ -146,6 +146,9 @@ class DotoolTyper:
         # geplakte zinnen wanneer een nieuw blok start na pauze/herstart.
         self._last_char = ""
         self.lock = threading.Lock()
+        # Optionele callback voor type-fouten (bijv. dotool ontbreekt); wordt
+        # door de engine aan signals.status_message gekoppeld.
+        self.on_error = None
         self.proc = self._spawn()
 
     def _spawn(self) -> subprocess.Popen:
@@ -155,13 +158,18 @@ class DotoolTyper:
             env["DOTOOL_XKB_VARIANT"] = self.variant
         else:
             env.pop("DOTOOL_XKB_VARIANT", None)
-        return subprocess.Popen(
-            ["dotool"],
-            stdin=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
+        try:
+            return subprocess.Popen(
+                ["dotool"],
+                stdin=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+        except OSError:
+            # dotool ontbreekt/niet uitvoerbaar: GUI moet toch opstarten
+            # (testomgevingen zonder dotool, of installatie later nog gedaan).
+            return None
 
     def restart(self, layout: str, variant: str) -> None:
         with self.lock:
@@ -183,8 +191,14 @@ class DotoolTyper:
             cleaned += " "
 
         with self.lock:
-            if self.proc.poll() is not None:
+            if self.proc is None or self.proc.poll() is not None:
                 self.proc = self._spawn()
+                if self.proc is None:
+                    if self.on_error:
+                        self.on_error("dotool not found - install dotool for typing")
+                    # Buffer NIET aanpassen: anders klopt de diff niet meer
+                    # zodra dotool alsnog beschikbaar wordt.
+                    return ""
 
             common_len = 0
             max_len = min(len(self.typed_buffer), len(cleaned))
@@ -223,7 +237,7 @@ class DotoolTyper:
 
     def _close_unlocked(self) -> None:
         try:
-            if self.proc.stdin:
+            if self.proc and self.proc.stdin:
                 self.proc.stdin.close()
             self.proc.terminate()
         except Exception:
@@ -258,6 +272,7 @@ class DictationEngine:
         self.cfg = cfg
         self.signals = signals
         self.typer = DotoolTyper(cfg["xkb_layout"], cfg["xkb_variant"])
+        self.typer.on_error = lambda msg: self.signals.status_message.emit(msg)
 
         self.listening = False
         self.speaking = False
