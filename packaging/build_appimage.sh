@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-VERSION="1.0.1"
+# Versie mag van buitenaf (CI/Release-tag) overstemd worden
+VERSION="${VERSION:-1.0.1}"
 APP_NAME="WaylandLiveDictate"
 OUTPUT_NAME="${APP_NAME}-${VERSION}-x86_64.AppImage"
 
@@ -74,6 +75,9 @@ fi
 UPDATE_URL="gh-releases-zsync|woutervanelten|wayland-dictate|latest|WaylandLiveDictate-*-x86_64.AppImage.zsync"
 
 # APPIMAGE_EXTRACT_AND_RUN: nodig in omgevingen zonder /dev/fuse (CI/containers)
-ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" -u "$UPDATE_URL" WaylandDictate.AppDir "dist/$OUTPUT_NAME"
+APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" -u "$UPDATE_URL" WaylandLiveDictate.AppDir "dist/$OUTPUT_NAME"
+
+# appimagetool schrijft de .zsync in de huidige map: netjes naast het icoon in dist/
+if [ -f "${OUTPUT_NAME}.zsync" ]; then mv -f "${OUTPUT_NAME}.zsync" dist/; fi
 
 echo "Klaar: dist/$OUTPUT_NAME en .zsync zijn gegenereerd!"
