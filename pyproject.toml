@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wayland-dictate"
-version = "1.0.0"
+version = "1.0.1"
 description = "Live streaming dictation and translation for Wayland powered by Lemonade AI"
 requires-python = ">=3.11"
 dependencies = [

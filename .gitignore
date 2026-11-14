@@ -6,6 +6,7 @@ build/
 dist/
 *.AppDir/
 *.AppImage
+.buildcache/
 *.pkg.tar.zst
 pkg/
 src/*.tar.gz

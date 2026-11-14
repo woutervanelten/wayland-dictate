@@ -1,3 +1,4 @@
+import difflib
 import io
 import json
 import os
@@ -15,7 +16,7 @@ import httpx
 import numpy as np
 import sounddevice as sd
 import webrtcvad
-from PySide6.QtCore import QObject, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -105,6 +106,11 @@ SAMPLE_RATE = 16000
 FRAME_MS = 30
 FRAME_SAMPLES = int(SAMPLE_RATE * FRAME_MS / 1000)
 
+# Audio binnen één dicteersessie wordt volledig bewaard en als geheel opnieuw
+# naar Whisper gestuurd, zodat eerdere zinnen met nieuwe context bijgesteld
+# kunnen worden. Bij dit plafond wordt het blok gefinaliseerd en gestart.
+SESSION_MAX_SEC = 30.0
+
 FILLER_RE = re.compile(r"\b(u+h+m*|e+h+m*|h+m+|e+u+h+)\b[,.]?\s*", flags=re.IGNORECASE)
 DUP_WORD_RE = re.compile(r"\b(\w+)\s+\1\b", flags=re.IGNORECASE)
 
@@ -124,6 +130,11 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        # Bevat een API-sleutel in plaintext: alleen eigenaar lees/schrijf.
+        os.chmod(CONFIG_PATH, 0o600)
+    except OSError:
+        pass
 
 
 class DotoolTyper:
@@ -131,6 +142,9 @@ class DotoolTyper:
         self.layout = layout
         self.variant = variant
         self.typed_buffer = ""
+        # Laaste typed karakter over buffer-resets heen: voorkomt aan elkaar
+        # geplakte zinnen wanneer een nieuw blok start na pauze/herstart.
+        self._last_char = ""
         self.lock = threading.Lock()
         self.proc = self._spawn()
 
@@ -184,12 +198,18 @@ class DotoolTyper:
             if backspaces > 0:
                 cmds.extend(["key backspace"] * backspaces)
             if to_type:
+                # Scheiding na een buffer-reset (pauze/herstart) zodat woorden niet
+                # aan elkaar plakken; bewust níet in typed_buffer, anders loopt de
+                # diff bij elke volgende update binnen dit blok vast op positie 0.
+                if not self.typed_buffer and self._last_char not in ("", " "):
+                    cmds.append("key space")
                 cmds.append(f"type {to_type}")
 
             if cmds and self.proc.stdin:
                 self.proc.stdin.write("\n".join(cmds) + "\n")
                 self.proc.stdin.flush()
 
+            self._last_char = cleaned[-1] if cleaned else ""
             self.typed_buffer = "" if is_final else cleaned
         return cleaned.strip()
 
@@ -230,6 +250,7 @@ class EngineSignals(QObject):
     transcript_logged = Signal(str, bool)
     status_message = Signal(str)
     models_loaded = Signal(list)
+    show_requested = Signal()
 
 
 class DictationEngine:
@@ -240,11 +261,14 @@ class DictationEngine:
 
         self.listening = False
         self.speaking = False
+        # Incremented on every pause/resume so in-flight results of a previous
+        # session are discarded instead of being typed into the new one.
+        self.session_gen = 0
         self.stop_event = threading.Event()
         self.cfg_lock = threading.Lock()
 
         self.audio_q: queue.Queue[np.ndarray] = queue.Queue()
-        self.job_q: queue.Queue[tuple[np.ndarray, bool]] = queue.Queue()
+        self.job_q: queue.Queue[tuple[np.ndarray, str, int]] = queue.Queue()
 
         self._audio_thread = threading.Thread(target=self._audio_loop, daemon=True)
         self._worker_thread = threading.Thread(target=self._inference_loop, daemon=True)
@@ -269,6 +293,7 @@ class DictationEngine:
             return
         self.listening = active
         self.speaking = False
+        self.session_gen += 1
         self.typer.reset_buffer()
         while not self.job_q.empty():
             try:
@@ -302,15 +327,25 @@ class DictationEngine:
                     models = [m["id"] for m in r.json().get("data", []) if "id" in m]
                     self.signals.models_loaded.emit(models)
 
-                if "localhost" in url or "127.0.0.1" in url:
-                    client.post(
-                        f"{url}/load",
-                        json={"model_name": w_model, "whispercpp_backend": w_backend},
-                        timeout=30.0,
-                    )
-                    if npu_on and l_model:
-                        client.post(f"{url}/load", json={"model_name": l_model}, timeout=30.0)
-            self.signals.status_message.emit("API / llm connected.")
+                    if "localhost" in url or "127.0.0.1" in url:
+                        # Best-effort voorladen: een trage /load mag niet als
+                        # verbindingsfout geafficheerd worden.
+                        try:
+                            client.post(
+                                f"{url}/load",
+                                json={"model_name": w_model, "whispercpp_backend": w_backend},
+                                timeout=30.0,
+                            )
+                        except Exception:
+                            pass
+                        if npu_on and l_model:
+                            try:
+                                client.post(f"{url}/load", json={"model_name": l_model}, timeout=30.0)
+                            except Exception:
+                                pass
+                    self.signals.status_message.emit("API / llm connected.")
+                else:
+                    self.signals.status_message.emit(f"Endpoint warning: HTTP {r.status_code}")
         except Exception as exc:
             self.signals.status_message.emit(f"Endpoint warning: {exc}")
 
@@ -332,6 +367,7 @@ class DictationEngine:
     def _audio_loop(self) -> None:
         last_rms_emit = 0.0
         current_device = None
+        session_max_samples = int(SESSION_MAX_SEC * SAMPLE_RATE)
 
         while not self.stop_event.is_set():
             with self.cfg_lock:
@@ -339,7 +375,8 @@ class DictationEngine:
             dev_idx = self._resolve_device_index(desired_device)
             current_device = desired_device
 
-            speech_frames: list[np.ndarray] = []
+            session: list[np.ndarray] = []  # complete audio of this dictation session
+            session_samples = 0
             pre_roll: list[np.ndarray] = []
             speech_streak = 0
             in_speech = False
@@ -386,10 +423,11 @@ class DictationEngine:
                             self.signals.rms_updated.emit(rms)
 
                         if not self.listening:
-                            if in_speech:
-                                in_speech = False
-                                speech_frames = []
-                                speech_streak = 0
+                            # Na pauze/hervatten begint elke sessie brandschoon.
+                            in_speech = False
+                            speech_streak = 0
+                            session = []
+                            session_samples = 0
                             continue
 
                         active = rms >= rms_thresh and vad.is_speech(frame.tobytes(), SAMPLE_RATE)
@@ -404,22 +442,40 @@ class DictationEngine:
                                     in_speech = True
                                     self.speaking = True
                                     self.signals.state_changed.emit("speaking")
-                                    speech_frames = list(pre_roll)
+                                    if session:
+                                        # Loop van de sessie door: alleen een korte
+                                        # stiltebrug tussen de zinnen behouden.
+                                        bridge = pre_roll[-3:]
+                                        session.extend(bridge)
+                                        session_samples += sum(len(f) for f in bridge)
+                                    else:
+                                        session = list(pre_roll)
+                                        session_samples = sum(len(f) for f in session)
+                                    pre_roll = []
                                     last_partial_time = now
                                     last_voice_time = now
                             else:
-                                speech_frames.append(frame)
+                                session.append(frame)
+                                session_samples += len(frame)
                                 last_voice_time = now
-                                if now - last_partial_time >= part_sec:
+                                if session_samples >= session_max_samples:
+                                    # Plafond bereikt: blok finaliseren en een nieuw
+                                    # audioblok starten.
+                                    self.job_q.put((np.concatenate(session), "commit", self.session_gen))
+                                    session = []
+                                    session_samples = 0
                                     last_partial_time = now
-                                    self.job_q.put((np.concatenate(speech_frames), False))
+                                elif now - last_partial_time >= part_sec:
+                                    last_partial_time = now
+                                    self.job_q.put((np.concatenate(session), "partial", self.session_gen))
                         else:
                             speech_streak = 0
                             if in_speech:
-                                speech_frames.append(frame)
+                                session.append(frame)
+                                session_samples += len(frame)
                                 if now - last_voice_time >= sil_sec:
-                                    self.job_q.put((np.concatenate(speech_frames), True))
-                                    speech_frames = []
+                                    # Stilte: checkpunt van de volledige sessie.
+                                    self.job_q.put((np.concatenate(session), "checkpoint", self.session_gen))
                                     in_speech = False
                                     self.speaking = False
                                     if self.listening:
@@ -436,18 +492,24 @@ class DictationEngine:
         with httpx.Client() as client:
             while not self.stop_event.is_set():
                 try:
-                    pcm_data, is_final = self.job_q.get(timeout=0.1)
+                    pcm_data, kind, gen = self.job_q.get(timeout=0.1)
                 except queue.Empty:
                     continue
 
-                if not self.listening:
+                if not self.listening or gen != self.session_gen:
                     continue
 
-                if not is_final:
-                    while not self.job_q.empty():
-                        next_pcm, next_final = self.job_q.get_nowait()
-                        pcm_data, is_final = next_pcm, next_final
-                        if is_final:
+                if kind == "partial":
+                    # Alleen het nieuwste equivalent resultaat verwerken.
+                    while True:
+                        try:
+                            next_pcm, next_kind, next_gen = self.job_q.get_nowait()
+                        except queue.Empty:
+                            break
+                        if next_gen != self.session_gen:
+                            continue
+                        pcm_data, kind = next_pcm, next_kind
+                        if kind != "partial":
                             break
 
                 with self.cfg_lock:
@@ -485,10 +547,10 @@ class DictationEngine:
                     )
                     resp.raise_for_status()
                     text = resp.json().get("text", "").strip()
-                    if not text or not self.listening:
+                    if not text or not self.listening or gen != self.session_gen:
                         continue
 
-                    should_run_llm = is_final and l_model and (
+                    should_run_llm = kind in ("checkpoint", "commit") and l_model and (
                         mode == "translate_en" or (npu_on and len(text.split()) >= 3)
                     )
                     if should_run_llm:
@@ -508,7 +570,13 @@ class DictationEngine:
                             timeout=15.0,
                         )
                         llm_resp.raise_for_status()
-                        polished = llm_resp.json()["choices"][0]["message"]["content"].strip()
+                        choice = llm_resp.json()["choices"][0]
+                        if choice.get("finish_reason") == "length":
+                            # Afgekapte polish zou via de diff de staart van de
+                            # sessie wegpoetsen; behoud daarom de ruwe tekst.
+                            polished = ""
+                        else:
+                            polished = choice["message"]["content"].strip()
                         if len(polished) >= 2 and polished[0] in (chr(34), chr(39)) and polished[-1] == polished[0]:
                             polished = polished[1:-1].strip()
                         if polished:
@@ -519,10 +587,10 @@ class DictationEngine:
                                 if ratio >= min_sim:
                                     text = polished
 
-                    if self.listening:
-                        written = self.typer.apply_diff(text, is_final=is_final)
-                        if written:
-                            self.signals.transcript_logged.emit(written, is_final)
+                    if self.listening and gen == self.session_gen:
+                        written = self.typer.apply_diff(text, is_final=(kind == "commit"))
+                        if written and kind != "partial":
+                            self.signals.transcript_logged.emit(written, True)
                 except Exception as exc:
                     self.signals.status_message.emit(f"Inference error: {exc}")
 
@@ -555,7 +623,9 @@ def make_tray_icon(state: str) -> QIcon:
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, cfg: dict, engine: DictationEngine, signals: EngineSignals) -> None:
+    def __init__(
+        self, cfg: dict, engine: DictationEngine, signals: EngineSignals, autostart_once: bool = False
+    ) -> None:
         super().__init__()
         self.cfg = cfg
         self.engine = engine
@@ -571,7 +641,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._apply_translations()
 
-        if self.cfg.get("auto_listen_on_start", False):
+        if autostart_once or self.cfg.get("auto_listen_on_start", False):
             self.engine.set_listening(True)
 
     def _build_ui(self) -> None:
@@ -650,7 +720,6 @@ class MainWindow(QMainWindow):
         self.lbl_lang_mode = QLabel()
         lang_mode_row.addWidget(self.src_lang_combo)
         lang_mode_row.addSpacing(10)
-        lang_mode_row.addWidget(self.lbl_lang_mode)
         lang_mode_row.addWidget(self.mode_combo, 1)
         self.form_models.addRow(self.lbl_lang_mode, lang_mode_row)
 
@@ -949,6 +1018,8 @@ class MainWindow(QMainWindow):
         self.signals.transcript_logged.connect(self._on_transcript_logged)
         self.signals.status_message.connect(self.status_lbl.setText)
         self.signals.models_loaded.connect(self._on_models_loaded)
+        # Kan vanuit de IPC-thread afvuren; queued connectie marshalt naar main.
+        self.signals.show_requested.connect(self._show_window)
 
     @Slot(int)
     def _on_rms_updated(self, rms: int) -> None:
@@ -1136,7 +1207,7 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
 
-def start_ipc_server(engine: DictationEngine, window: MainWindow) -> None:
+def start_ipc_server(engine: DictationEngine) -> None:
     if SOCKET_PATH.exists():
         try:
             SOCKET_PATH.unlink()
@@ -1145,6 +1216,11 @@ def start_ipc_server(engine: DictationEngine, window: MainWindow) -> None:
 
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(str(SOCKET_PATH))
+    try:
+        # Socket kan in /tmp vallen als XDG_RUNTIME_DIR ontbreekt: afsluiten.
+        os.chmod(SOCKET_PATH, 0o600)
+    except OSError:
+        pass
     srv.listen(5)
 
     def serve() -> None:
@@ -1168,7 +1244,9 @@ def start_ipc_server(engine: DictationEngine, window: MainWindow) -> None:
                     engine.set_listening(False)
                     conn.sendall(b"OFF\n")
                 elif cmd == "SHOW":
-                    QTimer.singleShot(0, window._show_window)
+                    # QTimer.singleShot vanuit een gewone thread vuurt NOOIT af
+                    # (geen event dispatcher): gebruik een Qt-signal.
+                    engine.signals.show_requested.emit()
                     conn.sendall(b"OK\n")
 
     threading.Thread(target=serve, daemon=True).start()
@@ -1190,12 +1268,13 @@ def send_ipc_command(cmd: str) -> bool:
 
 
 def main() -> None:
+    autostart_once = False
     if "--toggle" in sys.argv:
         if send_ipc_command("TOGGLE"):
             return
-        cfg = load_config()
-        cfg["auto_listen_on_start"] = True
-        save_config(cfg)
+        # Koud starten via de sneltoets: nu direct luisteren, maar deze voorkeur
+        # niet persistent opslaan (anders start elke volgende launch als luisterend).
+        autostart_once = True
 
     if "--show" in sys.argv and send_ipc_command("SHOW"):
         return
@@ -1210,8 +1289,8 @@ def main() -> None:
     cfg = load_config()
     signals = EngineSignals()
     engine = DictationEngine(cfg, signals)
-    window = MainWindow(cfg, engine, signals)
-    start_ipc_server(engine, window)
+    window = MainWindow(cfg, engine, signals, autostart_once=autostart_once)
+    start_ipc_server(engine)
     engine.start_threads()
 
     if "--minimized" not in sys.argv:
